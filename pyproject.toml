@@ -48,7 +48,7 @@ Issues = "https://github.com/omicverse/py-soupx/issues"
 
 [tool.setuptools.packages.find]
 include = ["pysoupx*"]
-exclude = ["tests*", "examples*", "soupx-ref*"]
+exclude = ["tests*", "examples*", "SoupX-ref*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

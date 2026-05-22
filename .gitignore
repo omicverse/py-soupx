@@ -1,3 +1,4 @@
+# Python
 __pycache__/
 *.pyc
 *.pyo
@@ -7,7 +8,12 @@ dist/
 .pytest_cache/
 .ipynb_checkpoints/
 
-soupx-ref/
+# R SoupX reference clone (not our code — kept locally only)
+SoupX-ref/
+
+# Notebook / benchmark artifacts (regenerated on demand)
+examples/compare_out/
+examples/data/
 tests/R_out/
 Rplots.pdf
-data/
+Intersections_*.txt
