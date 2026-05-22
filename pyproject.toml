@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pysoupx"
+version = "0.1.0"
+description = "Pure-Python port of the R package SoupX — removal of ambient (soup) RNA contamination from droplet-based single-cell RNA-seq data."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Zehua Zeng", email = "starlitnightly@163.com" },
+]
+keywords = [
+    "SoupX", "ambient-RNA", "soup", "decontamination", "scRNA-seq",
+    "single-cell", "droplet", "contamination-fraction", "10x", "CellRanger",
+    "anndata",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+
+dependencies = [
+    "numpy>=1.23",
+    "scipy>=1.10",
+    "pandas>=1.5",
+    "anndata>=0.8",
+    "statsmodels>=0.13",
+]
+
+[project.optional-dependencies]
+plot = ["matplotlib>=3.6"]
+dev = ["pytest>=7", "pytest-cov", "ruff", "matplotlib>=3.6"]
+
+[project.urls]
+Homepage = "https://github.com/omicverse/py-soupx"
+Repository = "https://github.com/omicverse/py-soupx"
+Issues = "https://github.com/omicverse/py-soupx/issues"
+"Upstream R package" = "https://github.com/constantAmateur/SoupX"
+"Upstream (omicverse)" = "https://github.com/Starlitnightly/omicverse"
+
+[tool.setuptools.packages.find]
+include = ["pysoupx*"]
+exclude = ["tests*", "examples*", "soupx-ref*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::FutureWarning",
+    "ignore::RuntimeWarning",
+    "ignore::UserWarning",
+]
