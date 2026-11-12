@@ -173,6 +173,47 @@ def set_contamination_fraction(
 # ----------------------------------------------------------------------
 # quickMarkers
 # ----------------------------------------------------------------------
+def _phyper_upper(q, nr, nb, n):
+    """R ``phyper(q, NR, NB, n, lower.tail = FALSE)`` for vectors ``q``, ``nr``, ``nb`` and scalar ``n``.
+
+    As R (toms708-free path in phyper.c): swap tails when ``q`` is above the mean, then
+    ``P = d(q) * pdhyper(q)``, with the point probability from log-binomial coefficients and
+    the tail series of ``pdhyper`` summed in long double for all genes at once.
+    """
+    from scipy.special import gammaln
+
+    q = np.floor(np.asarray(q, dtype=np.float64) + 1e-7)
+    nr = np.asarray(nr, dtype=np.float64)
+    nb = np.asarray(nb, dtype=np.float64)
+    lower = np.zeros(q.shape, dtype=bool)
+    swap = q * (nr + nb) > n * nr
+    nr, nb = np.where(swap, nb, nr), np.where(swap, nr, nb)
+    q = np.where(swap, n - q - 1, q)
+    lower = swap                                   # lower tail wanted after the swap
+    out = np.empty(q.shape)
+    zero = q < 0
+    one = (q >= nr) | (q >= n)
+    out[zero] = np.where(lower[zero], 0.0, 1.0)
+    out[one & ~zero] = np.where(lower[one & ~zero], 1.0, 0.0)
+    m = ~zero & ~one
+    x, r, b = q[m], nr[m], nb[m]
+    lchoose = lambda a, k: gammaln(a + 1) - gammaln(k + 1) - gammaln(a - k + 1)
+    d = np.exp(lchoose(r, x) + lchoose(b, n - x) - lchoose(r + b, n))
+    total = np.zeros(x.shape, dtype=np.longdouble)
+    term = np.ones(x.shape, dtype=np.longdouble)
+    xx = x.copy()
+    live = xx > 0
+    while live.any():
+        i = np.flatnonzero(live)
+        term[i] *= xx[i] * (b[i] - n + xx[i]) / (n + 1 - xx[i]) / (r[i] + 1 - xx[i])
+        total[i] += term[i]
+        xx[i] -= 1
+        live[i] = (xx[i] > 0) & (term[i] >= np.finfo(float).eps * total[i])
+    pd_ = d * (1.0 + total.astype(np.float64))     # P(X <= x) for the (possibly swapped) tail
+    out[m] = np.where(lower[m], pd_, 0.5 - pd_ + 0.5)
+    return out
+
+
 def quick_markers(
     toc: sp.spmatrix,
     clusters: Sequence,
@@ -191,7 +232,6 @@ def quick_markers(
     ``N=None`` returns every gene passing the per-cluster FDR.
     """
     from statsmodels.stats.multitest import multipletests
-    from scipy.stats import hypergeom
 
     toc = toc.tocsc()
     genes = np.asarray(list(map(str, genes)))
@@ -226,7 +266,9 @@ def quick_markers(
     qvals = np.ones((n_gene, n_clust))
     for c in range(n_clust):
         # P(X >= nObs) with X ~ hypergeom(n_cells, n_tot, cl_cnts[c])
-        pv = hypergeom.sf(n_obs[:, c] - 1, n_cells, n_tot, cl_cnts[c])
+        pv = np.ones(n_gene)                       # P(X >= 0) = 1 where nObs = 0
+        nz = n_obs[:, c] > 0
+        pv[nz] = _phyper_upper(n_obs[nz, c] - 1, n_tot[nz], n_cells - n_tot[nz], cl_cnts[c])
         pv = np.where(np.isfinite(pv), pv, 1.0)
         qvals[:, c] = multipletests(pv, method="fdr_bh")[1]
 
@@ -240,31 +282,20 @@ def quick_markers(
         snd_best[:, c] = sub[np.arange(n_gene), amax]
         snd_name[:, c] = cl_levels[other][amax]
 
-    rows = []
+    sel_g, sel_c = [], []
     for c in range(n_clust):
         order = np.argsort(-score[:, c], kind="stable")
         passed = qvals[:, c] < FDR
-        if N is not None and passed.sum() >= N:
-            sel = order[:N]
-        else:
-            sel = order[passed[order]]
-        for g in sel:
-            rows.append({
-                "gene": genes[g],
-                "cluster": cl_levels[c],
-                "geneFrequency": tf[g, c],
-                "geneFrequencyOutsideCluster": ntf[g, c],
-                "geneFrequencySecondBest": snd_best[g, c],
-                "geneFrequencyGlobal": n_tot[g] / n_cells,
-                "secondBestClusterName": snd_name[g, c],
-                "tfidf": score[g, c],
-                "idf": idf[g],
-                "qval": qvals[g, c],
-            })
-    return pd.DataFrame(rows, columns=[
-        "gene", "cluster", "geneFrequency", "geneFrequencyOutsideCluster",
-        "geneFrequencySecondBest", "geneFrequencyGlobal",
-        "secondBestClusterName", "tfidf", "idf", "qval"])
+        sel = order[:N] if (N is not None and passed.sum() >= N) else order[passed[order]]
+        sel_g.append(sel)
+        sel_c.append(np.full(sel.size, c))
+    g = np.concatenate(sel_g).astype(int)
+    c = np.concatenate(sel_c).astype(int)
+    return pd.DataFrame({
+        "gene": genes[g], "cluster": cl_levels[c], "geneFrequency": tf[g, c],
+        "geneFrequencyOutsideCluster": ntf[g, c], "geneFrequencySecondBest": snd_best[g, c],
+        "geneFrequencyGlobal": n_tot[g] / n_cells, "secondBestClusterName": snd_name[g, c],
+        "tfidf": score[g, c], "idf": idf[g], "qval": qvals[g, c]})
 
 
 # ----------------------------------------------------------------------
@@ -393,9 +424,11 @@ def auto_est_cont(
         mrks = quick_markers(sc.toc, clusters.to_numpy(), sc.genes, sc.cells,
                              N=None)
         # keep most specific entry per gene
-        mrks = mrks.sort_values(["gene", "tfidf"], ascending=[True, False])
+        # as R: order(gene, -tfidf), first entry per gene, then a stable order(-tfidf),
+        # so equal tf-idf values keep gene-name order
+        mrks = mrks.sort_values(["gene", "tfidf"], ascending=[True, False], kind="mergesort")
         mrks = mrks.drop_duplicates("gene", keep="first")
-        mrks = mrks.sort_values("tfidf", ascending=False).reset_index(drop=True)
+        mrks = mrks.sort_values("tfidf", ascending=False, kind="mergesort").reset_index(drop=True)
         mrks = mrks[mrks["tfidf"] > tfidf_min].reset_index(drop=True)
     else:
         mrks = top_markers.reset_index(drop=True)

@@ -5,9 +5,9 @@ A **pure-Python re-implementation of [SoupX](https://github.com/constantAmateur/
 - AnnData-native — drop-in for the scanpy ecosystem (`load_10x`, `SoupChannel.from_anndata`, `to_anndata`)
 - **No `rpy2`**, no R install — soup-profile estimation, the tf-idf marker search, the `autoEstCont` posterior, and the constrained `adjustCounts` subtraction are all implemented directly in NumPy/SciPy
 - Same function surface as the R workflow (`estimateSoup` → `setClusters` → `autoEstCont` → `adjustCounts`)
-- Bit-for-bit reproducibility against the R reference on the deterministic kernels (see `tests/test_r_parity.py`)
+- Same results as R SoupX 1.6.2: same soup profile, marker genes and contamination fraction, corrected counts within ~2e-11, and the same integers as R for `round_to_int=True` with the same seed (see [Relationship to R SoupX](#relationship-to-r-soupx))
 
-> This is a **standalone mirror** of the canonical implementation that lives in [`omicverse`](https://github.com/Starlitnightly/omicverse). All algorithmic work is developed upstream in omicverse and synced here for users who want SoupX without the full omicverse stack.
+> omicverse uses this package for `ov.pp.ambient.remove_ambient(adata, method='soupx', raw=raw)`.
 
 ## Install
 
@@ -83,28 +83,30 @@ calculate_contamination_fraction(sc, gene_set, ute)
 
 `adjust_counts` supports all three SoupX methods: `subtraction` (default), `soupOnly` and `multinomial`.
 
-## Reproducing R results exactly
+## Relationship to R SoupX
 
-SoupX's core kernels are deterministic, so feeding both ports identical raw + filtered matrices yields bit-for-bit agreement:
+pysoupx follows SoupX 1.6.2 step by step. With the same raw and filtered matrices and clusters:
 
-| Quantity | Result |
+| Step | Agreement with SoupX 1.6.2 |
 |---|---|
-| Soup profile (`estimateSoup`) | **bit-exact** (max abs diff ~1e-16) |
-| `quickMarkers` tf-idf / qvals / idf | **bit-exact** (max abs diff ~1e-16) |
-| `adjustCounts` cluster-level, fixed rho | **bit-exact** (max abs diff 0) |
-| `adjustCounts` cell-level, fixed rho | **bit-exact** (max abs diff ~1e-13) |
-| `autoEstCont` rho | **exact** (identical posterior mode) |
+| Soup profile (`estimateSoup`) | identical |
+| `quickMarkers` (tf-idf, hypergeometric q-values as R's `phyper`) | same markers |
+| `autoEstCont` | same marker genes, same contamination fraction |
+| `estimateNonExpressingCells` + `calculateContaminationFraction` | same cells, same rho |
+| `adjustCounts` (subtraction, soupOnly, multinomial) | corrected counts within ~2e-11 |
+| `adjustCounts(roundToInt = TRUE)` | same integers for the same seed (R's random numbers, `pysoupx.rrng`) |
 
-`tests/test_r_parity.py` runs the R reference (`r_reference_driver.R`) inside the `CMAP` R env on the same synthetic raw + filtered matrices the Python side uses, and checks the soup profile, marker table, `rho` and corrected matrices match. `examples/compare_R_vs_Python.ipynb` does the same on the real SoupX **toyData** 10x dataset and visualises the agreement with `omicverse`.
+`adjust_counts(round_to_int=True, seed=s)` reproduces `set.seed(s); adjustCounts(sc, roundToInt = TRUE)`:
+the rounding draws R's `rbinom(n, 1, p)` from R's Mersenne-Twister stream.
 
-The only intrinsically stochastic steps are the optional integer rounding (`round_to_int`) and the `multinomial` method's tie-breaking, both seedable via the `seed` argument.
+`tests/test_r_reference.py` checks R's random numbers and `phyper` against stored values (no R needed);
+`tests/test_r_parity.py` runs SoupX through `Rscript` (set `PYSOUPX_RSCRIPT`) and compares every step.
+The benchmark on 10x human–mouse mixtures is in `report/`.
 
-## Relationship to omicverse
+## Use in omicverse
 
-Developed **upstream** in [`omicverse`](https://github.com/Starlitnightly/omicverse):
-
-- Canonical implementation lives in omicverse
-- Standalone mirror (this repo): same code, same API, minus the omicverse packaging
+`ov.pp.ambient.remove_ambient(adata, method='soupx', raw=raw_adata)` runs pysoupx on a filtered, clustered
+AnnData and its raw droplet matrix.
 
 ## Citation
 
