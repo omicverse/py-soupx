@@ -16,6 +16,7 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import scanpy
 import scipy.io
 import scipy.sparse as sp
 
@@ -45,7 +46,7 @@ def result(engine, task, run=1):
     return r, adj, np.fromfile(d / "soup_est.bin")
 
 
-rows, cellwise = [], {}
+rows, cellwise, umap_frac = [], {}, {}
 for t in sorted(LABEL, key=list(LABEL).index):
     td = TASKS / t
     genes = pd.read_csv(td / "genes.tsv", sep="\t")
@@ -82,6 +83,7 @@ for t in sorted(LABEL, key=list(LABEL).index):
                               for k in (1, 2))                    # faster of the two runs
         if t == EXAMPLE:
             cellwise[e] = (o0[pure] / n[pure], o1[pure] / (o1[pure] + s1[pure]))
+            umap_frac[e] = np.where(pure, o1 / (o1 + s1), np.nan)
     d = abs(res["py"][1] - res["R"][1])
     row["maxdiff"] = d.max()
     row["maxval"] = abs(res["R"][1]).max()
@@ -89,6 +91,17 @@ for t in sorted(LABEL, key=list(LABEL).index):
     row["same_markers"] = set(res["py"][0]["markers"]) == set(res["R"][0]["markers"])
     row["n_markers"] = len(res["R"][0]["markers"])
     row["entries"] = res["R"][1].nnz
+    if t == EXAMPLE:                                              # UMAP of the cells, for display only
+        umap_frac["before"] = np.where(pure, o0 / n, np.nan)
+        umap_species = species.species.to_numpy()
+        ad = scanpy.AnnData(sp.csr_matrix(toc.T).astype(np.float32))
+        scanpy.pp.normalize_total(ad, target_sum=1e4)
+        scanpy.pp.log1p(ad)
+        scanpy.pp.highly_variable_genes(ad, n_top_genes=2000, subset=True)
+        scanpy.pp.pca(ad, n_comps=30, random_state=0)
+        scanpy.pp.neighbors(ad, n_neighbors=15, random_state=0)
+        scanpy.tl.umap(ad, random_state=0)
+        xy = ad.obsm["X_umap"]
     if t == EXAMPLE:                                              # 200,000 random nonzero entries of R's matrix
         xc = res["R"][1].tocoo()
         pick = np.random.default_rng(0).choice(xc.nnz, min(200_000, xc.nnz), replace=False)
@@ -100,8 +113,8 @@ tab = pd.DataFrame(rows)
 tab.to_csv(OUT / "comparison_per_dataset.tsv", sep="\t", index=False)
 
 # ======================= Figure 1 =======================
-fig = plt.figure(figsize=(7.2, 4.4))
-gs = fig.add_gridspec(2, 1, height_ratios=[1.0, 1.0], hspace=0.55)
+fig = plt.figure(figsize=(7.2, 6.5))
+gs = fig.add_gridspec(3, 1, height_ratios=[1.0, 1.0, 0.95], hspace=0.55)
 
 
 def panel(ax, s, dx=-0.36):
@@ -200,10 +213,50 @@ for h in leg.legend_handles:
     h.set_sizes([10])
 panel(axe, "e", dx=-0.2)
 
+
+row3 = gs[2].subgridspec(1, 4, wspace=0.06)
+
+
+def umap_ax(k, title, letter):
+    ax = fig.add_subplot(row3[k])
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for sp_ in ax.spines.values():
+        sp_.set_visible(False)
+    ax.set_title(title)
+    ax.set_aspect("equal")
+    panel(ax, letter, dx=-0.04)
+    return ax
+
+
+ax = umap_ax(0, f"{LABEL[EXAMPLE]}: species", "f")
+for name, col in [("human", "#2f7f6f"), ("mouse", "#b5a642"), ("mixed", "#2a2a2a")]:
+    m = umap_species == name
+    ax.scatter(xy[m, 0], xy[m, 1], s=0.6 if name != "mixed" else 1.2, c=col, lw=0, rasterized=True,
+               label=f"{name} ({m.sum():,})")
+leg = ax.legend(loc="upper center", bbox_to_anchor=(0.5, 0.0), ncol=3, fontsize=5.5, handletextpad=0.1,
+                columnspacing=0.6)
+for h in leg.legend_handles:
+    h.set_sizes([10])
+vmax = np.nanpercentile(umap_frac["before"] * 100, 99)
+for k, (key, title, letter) in enumerate([("before", "Before correction", "g"), ("R", "After, SoupX (R)", "h"),
+                                          ("py", "After, pysoupx", "i")]):
+    ax = umap_ax(k + 1, title, letter)
+    v = umap_frac[key] * 100
+    nan = np.isnan(v)
+    ax.scatter(xy[nan, 0], xy[nan, 1], s=0.6, c="#d9d8d3", lw=0, rasterized=True)
+    o = np.flatnonzero(~nan)[np.argsort(v[~nan], kind="stable")]
+    im = ax.scatter(xy[o, 0], xy[o, 1], c=v[o], s=0.6, cmap="magma_r", vmin=0, vmax=vmax, lw=0, rasterized=True)
+cax = fig.axes[-2].inset_axes([0.05, -0.14, 0.9, 0.035])
+cb = fig.colorbar(im, cax=cax, orientation="horizontal")
+cb.outline.set_visible(False)
+cb.ax.tick_params(labelsize=5.5, length=1.5)
+cax.set_title("other-species counts (% of cell; mixed cells grey)", fontsize=5.5, color=INK2, pad=2)
+
 pa, pd_ = axa.get_position(), axd.get_position()
 x0, x1 = pd_.x0 - 0.2 * pd_.width, pa.x0 - 0.075
 y0, y1 = pa.y0 - 0.02, pa.y1 + 0.035
-h_ov = (x1 - x0) * 7.2 / 4.4 * logos[1].shape[0] / logos[1].shape[1]
+h_ov = (x1 - x0) * 7.2 / 6.5 * logos[1].shape[0] / logos[1].shape[1]
 for img, rect, anchor in [(logos[0], [x0, y0 + h_ov + 0.012, x1 - x0, y1 - y0 - h_ov - 0.012], "N"),
                           (logos[1], [x0, y0, x1 - x0, h_ov], "S")]:
     axl = fig.add_axes(rect)
