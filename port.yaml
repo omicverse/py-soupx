@@ -11,21 +11,21 @@ domain: single-cell   # single-cell | spatial | trajectory | bulk | proteomics |
 upstream:
   name: "SoupX"
   source: "CRAN"   # CRAN | Bioconductor | GitHub | other
-  version: null   # TODO: upstream version the parity test was run against
+  version: "1.6.2"
   url: "https://cran.r-project.org/package=SoupX"
-  license: null   # TODO: upstream R package license (GPL-3, MIT, Artistic-2.0, …)
+  license: "GPL-2"
   citation: "Young, M.D. & Behjati, S. SoupX removes ambient RNA contamination from droplet-based single-cell RNA sequencing data. GigaScience 9, giaa151 (2020)."
 omicverse:
-  module: null   # TODO: e.g. ov.single.pyDoubletFinder, or leave null
+  module: "ov.pp.ambient.remove_ambient(method='soupx')"
   since: null
 parity:
-  status: unverified   # pass | partial | unverified
-  algorithm_class: null   # TODO: see omicverse-rebuildr/PARITY_TAXONOMY.md
-  metric: null   # TODO: pearson | spearman | ari | jaccard | max_abs_diff | …
-  threshold: null
-  value: null   # TODO: measured value on the canonical fixture
-  fixture: null
-  test: null
+  status: pass   # deterministic workflow matches; roundToInt reproduces R's random numbers
+  algorithm_class: deterministic   # roundToInt / multinomial tie-breaks use R's RNG (pysoupx.rrng)
+  metric: same rho and markers; corrected counts max_abs_diff
+  threshold: "rho and markers identical; corrected counts < 1e-10"
+  value: "5 10x human-mouse mixtures: rho and markers identical, corrected counts within ~2e-11"
+  fixture: "10x hgmm_1k_v3 / 5k_v3 / 6k / 10k_v3 / 12k"
+  test: "tests/test_r_parity.py (live R, PYSOUPX_RSCRIPT); tests/test_r_reference.py"
 artifacts:
   audit: null
   report: null

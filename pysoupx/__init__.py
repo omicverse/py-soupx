@@ -51,7 +51,7 @@ from .adjust import adjust_counts, alloc, expand_clusters
 from .io import load_10x, make_soup_channel, to_anndata
 from .plotting import plot_contamination_fraction
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 __all__ = [
     "SoupChannel",

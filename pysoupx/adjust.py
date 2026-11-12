@@ -25,6 +25,7 @@ import pandas as pd
 import scipy.sparse as sp
 from scipy.stats import chi2, poisson
 
+from .rrng import RRandom
 from .soupchannel import SoupChannel
 
 __all__ = ["adjust_counts", "alloc", "expand_clusters"]
@@ -82,6 +83,59 @@ def alloc(
 # ----------------------------------------------------------------------
 # expandClusters
 # ----------------------------------------------------------------------
+def _gsum(values, grp, n):
+    """Per-group sums accumulated in long double, in entry order (as R's ``sum``)."""
+    o = np.argsort(grp, kind="stable")
+    g = grp[o]
+    start = np.flatnonzero(np.r_[True, g[1:] != g[:-1]]) if g.size else np.array([], dtype=int)
+    out = np.zeros(n, dtype=np.float64)
+    if g.size:
+        out[g[start]] = np.add.reduceat(np.asarray(values, dtype=np.longdouble)[o], start).astype(np.float64)
+    return out
+
+
+def _group_alloc(tgt, lims, ws, grp, n_groups):
+    """SoupX ``alloc`` for many groups at once.
+
+    Entry ``e`` belongs to group ``grp[e]`` (entries of a group in their R order); ``tgt`` is
+    per group. Within each group the weights are normalised, the fast path applies when no
+    bucket overflows, and otherwise buckets are filled in the order of ``lims / ws`` (ties in
+    entry order, as R's ``order``). Sums and cumulative sums accumulate in long double, as R's.
+    """
+    w = ws / np.bincount(grp, ws, minlength=n_groups)[grp]
+    t = tgt[grp]
+    over = np.bincount(grp, (t * w > lims).astype(np.int64), minlength=n_groups) > 0
+    out = t * w                                                    # fast path
+    slow = np.flatnonzero(over[grp])
+    if slow.size == 0:
+        return out
+    g, y, ww, tt = grp[slow], lims[slow], w[slow], t[slow]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = y / ww
+    o = np.lexsort((np.arange(slow.size), ratio, g))               # by group, then lims / ws
+    g, y, ww, tt = g[o], y[o], ww[o], tt[o]
+    first = np.r_[True, g[1:] != g[:-1]]
+    start = np.flatnonzero(first)
+    idx = np.repeat(start, np.diff(np.r_[start, g.size]))
+    cw_all = np.cumsum(ww.astype(np.longdouble))
+    cy_all = np.cumsum(y.astype(np.longdouble))
+    cw = (cw_all - ww - (cw_all[idx] - ww[idx])).astype(np.float64)    # exclusive, within group
+    cy = (cy_all - y - (cy_all[idx] - y[idx])).astype(np.float64)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        k = y / ww * (1 - cw) + cy
+    k[ww == 0] = np.inf
+    b = k <= tt
+    ng = g.max() + 1
+    resid = tt - _gsum(np.where(b, y, 0.0), g, ng)[g]
+    denom = 1 - _gsum(np.where(b, ww, 0.0), g, ng)[g]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        val = np.where(b, y, resid * (ww / denom))
+    res = np.empty(slow.size)
+    res[o] = val
+    out[slow] = res
+    return out
+
+
 def expand_clusters(
     clust_soup_cnts: sp.spmatrix,
     cell_obs_cnts: sp.spmatrix,
@@ -89,59 +143,53 @@ def expand_clusters(
     cluster_names: Sequence[str],
     cell_weights: np.ndarray,
 ) -> sp.csc_matrix:
-    """Expand cluster-level soup counts down to single cells.
+    """Expand cluster-level soup counts down to single cells (SoupX ``expandClusters``).
 
-    For each cluster the soup counts of every gene are distributed over
-    its member cells (weighted by ``cell_weights``, capped by observed
-    counts) using :func:`alloc`.  Port of SoupX ``expandClusters``.
+    For each cluster the soup counts of every gene are distributed over its member cells,
+    weighted by ``cell_weights`` and capped by the observed counts, with :func:`alloc`.
+    Genes without soup get 0 and genes whose counts are all soup keep their counts. All
+    (cluster, gene) groups are solved together on the nonzero entries.
     """
-    clust_soup_cnts = clust_soup_cnts.tocsc()
-    cell_obs_cnts = cell_obs_cnts.tocsc()
-    clusters = np.asarray([str(c) for c in clusters])
+    toc = sp.csc_matrix(cell_obs_cnts, dtype=np.float64)
+    names = [str(c) for c in cluster_names]
+    kidx = pd.Index(names).get_indexer([str(c) for c in clusters])
+    n_k, n_cells = len(names), toc.shape[1]
     ws = np.asarray(cell_weights, dtype=np.float64)
-    n_genes = cell_obs_cnts.shape[0]
-
-    out = sp.lil_matrix((n_genes, cell_obs_cnts.shape[1]), dtype=np.float64)
-    for j, cl in enumerate(cluster_names):
-        w_cells = np.where(clusters == str(cl))[0]
-        if w_cells.size == 0:
-            continue
-        wsum = ws[w_cells].sum()
-        ww = ws[w_cells] / wsum if wsum > 0 else np.full(len(w_cells),
-                                                         1.0 / len(w_cells))
-        lims = cell_obs_cnts[:, w_cells].tocsr()
-        n_soup = np.asarray(clust_soup_cnts[:, j].todense()).ravel()
-        row_sums = np.asarray(lims.sum(axis=1)).ravel()
-        # genes needing redistribution (some but not all counts are soup)
-        w_genes = np.where((n_soup > 0) & (n_soup < row_sums))[0]
-        for g in w_genes:
-            row = lims.getrow(g)
-            cols = row.indices
-            vals = row.data
-            alloc_vals = alloc(n_soup[g], vals, ww[cols])
-            for c_local, v in zip(cols, alloc_vals):
-                out[g, w_cells[c_local]] = v
-        # genes where all counts are soup -> set to observed limits
-        w_full = np.where((n_soup > 0) & (n_soup >= row_sums)
-                          & (row_sums > 0))[0]
-        for g in w_full:
-            row = lims.getrow(g)
-            for c_local, v in zip(row.indices, row.data):
-                out[g, w_cells[c_local]] = v
-    return out.tocsc()
+    ww = ws / np.bincount(kidx, ws, minlength=n_k)[kidx]
+    soup = np.asarray(sp.csc_matrix(clust_soup_cnts).todense(), dtype=np.float64)   # genes x clusters
+    member = sp.csr_matrix((np.ones(n_cells), (np.arange(n_cells), kidx)), shape=(n_cells, n_k))
+    rows = np.asarray((toc @ member).todense())                    # observed counts per gene and cluster
+    # nonzero entries in the order R visits them: by cluster, then cell, then gene
+    perm = np.argsort(kidx, kind="stable")
+    tp = toc[:, perm]
+    tp.sort_indices()
+    cell = perm[np.repeat(np.arange(n_cells), np.diff(tp.indptr))]
+    gene, val = tp.indices, tp.data
+    k = kidx[cell]
+    t = soup[gene, k]
+    res = np.where(t > 0, val, 0.0)                                # no soup -> 0; all soup -> counts
+    part = np.flatnonzero((t > 0) & (t < rows[gene, k]))
+    if part.size:
+        key = gene[part].astype(np.int64) * n_k + k[part]
+        present = np.zeros(soup.size, dtype=bool)
+        present[key] = True
+        grp = (np.cumsum(present) - 1)[key]
+        res[part] = _group_alloc(soup.ravel()[present], val[part], ww[cell[part]], grp, int(present.sum()))
+    out = sp.csc_matrix((res, (gene, cell)), shape=toc.shape)
+    out.eliminate_zeros()
+    return out
 
 
 # ----------------------------------------------------------------------
 # adjustCounts
 # ----------------------------------------------------------------------
-def _stochastic_round(m: sp.coo_matrix, rng: np.random.Generator
-                      ) -> sp.coo_matrix:
-    """Floor each value, then bump up by 1 with prob = fractional part."""
-    x = m.data
-    fl = np.floor(x)
-    frac = x - fl
-    bump = rng.binomial(1, np.clip(frac, 0, 1))
-    out = sp.coo_matrix((fl + bump, (m.row, m.col)), shape=m.shape)
+def _stochastic_round(m: sp.csc_matrix, rng: RRandom) -> sp.csc_matrix:
+    """SoupX ``floor(x) + rbinom(length(x), 1, x - floor(x))`` over the stored values in
+    column-major order, with R's random numbers."""
+    m = sp.csc_matrix(m)
+    m.sort_indices()
+    fl = np.floor(m.data)
+    out = sp.csc_matrix((fl + rng.rbinom1(m.data - fl), m.indices, m.indptr), shape=m.shape)
     out.eliminate_zeros()
     return out
 
@@ -168,9 +216,12 @@ def adjust_counts(
     method
         ``'subtraction'`` (default), ``'soupOnly'`` or ``'multinomial'``.
     round_to_int
-        Stochastically round the result to integers.
+        Stochastically round the result to integers, as SoupX does: floor, then add 1
+        with probability equal to the fractional part.
     seed
-        RNG seed for the multinomial tie-breaks / stochastic rounding.
+        Seed for the multinomial tie-breaks and the rounding. The rounding uses R's
+        random number generator, so ``seed=s`` gives the same integers as
+        ``set.seed(s); adjustCounts(sc, roundToInt = TRUE)`` in R.
 
     Returns
     -------
@@ -245,7 +296,8 @@ def adjust_counts(
         out = _adjust_single(sc, method, tol, p_cut, rng, verbose)
 
     if round_to_int:
-        out = _stochastic_round(out.tocoo(), rng).tocsc()
+        rseed = seed if seed is not None else int(np.random.default_rng().integers(2 ** 31))
+        out = _stochastic_round(out, RRandom(rseed))
     return out
 
 
@@ -278,7 +330,7 @@ def _adjust_single(sc, method, tol, p_cut, rng, verbose) -> sp.csc_matrix:
     if method == "multinomial":
         # initialise with the subtraction solution
         sub = _adjust_single(sc, "subtraction", tol, p_cut, rng, verbose)
-        sub_int = _stochastic_round(sub.tocoo(), rng).tocsc()
+        sub_int = _stochastic_round(sub, RRandom(int(rng.integers(2 ** 31))))
         fit_init = (toc - sub_int).tocsc()
         ps = soup_frac
         cols = []
