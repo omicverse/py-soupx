@@ -229,8 +229,13 @@ macros = {
     "maxDiff": f"{tab.maxdiff.max():.0e}", "soupMaxDiff": f"{tab.soup_maxdiff.max():.0e}",
     "speedMin": f"{speed.min():.1f}", "speedMax": f"{speed.max():.1f}", "speedMed": f"{speed.median():.1f}",
     "tBigR": f"{big.sec_R:.0f}", "tBigPy": f"{big.sec_py:.0f}", "bigName": big.label,
-    "exampleName": LABEL[EXAMPLE], "exampleEntries": f"{int(ex.entries):,}",
+    "exampleName": LABEL[EXAMPLE], "exampleEntries": f"{int(ex.entries):,}", "nSample": "200,000",
 }
+for key, name in [("OneK", "hgmm_1k_v3"), ("FiveK", "hgmm_5k_v3"), ("SixK", "hgmm_6k"), ("TenK", "hgmm_10k_v3"),
+                  ("TwelveK", "hgmm_12k")]:
+    r_ = tab.set_index("dataset").loc[name]
+    macros[f"rho{key}"] = f"{r_.rho_R * 100:.1f}"
+    macros[f"true{key}"] = f"{r_.true_rho * 100:.1f}"
 with open(OUT / "numbers.tex", "w") as fh:
     for k, v in macros.items():
         fh.write(f"\\newcommand{{\\{k}}}{{{v}}}\n")
