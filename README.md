@@ -103,6 +103,15 @@ the rounding draws R's `rbinom(n, 1, p)` from R's Mersenne-Twister stream.
 `tests/test_r_parity.py` runs SoupX through `Rscript` (set `PYSOUPX_RSCRIPT`) and compares every step.
 The benchmark on 10x human–mouse mixtures is in `report/`.
 
+### Checking the contamination fraction
+
+On five 10x human–mouse mixtures (`report/`), `auto_est_cont` estimated 1.0–3.1% against a cross-species
+truth of 0.8–3.6%, at the 1% lower bound in one mixture. If the estimate sits at the edge of
+`contamination_range`, estimate it again from genes that some cells cannot express
+(`estimate_non_expressing_cells` + `calculate_contamination_fraction`), leaving out mitochondrial genes and
+MALAT1: they are over-represented in empty droplets and pull the estimate down. A single fraction per channel
+under-corrects cells with few counts, which carry more ambient RNA.
+
 ## Use in omicverse
 
 `ov.pp.ambient.remove_ambient(adata, method='soupx', raw=raw_adata)` runs pysoupx on a filtered, clustered
