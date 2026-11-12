@@ -1,6 +1,6 @@
 """Figure, table and the numbers quoted in the pysoupx technical report.
 
-Usage: python 05_figures.py <runs_dir> <tasks_dir> <out_dir>
+Usage: python 05_figures.py <runs_dir> <tasks_dir> <out_dir> [geneset_dir]
 Compares SoupX 1.6.2 and pysoupx on five 10x Genomics human-mouse mixtures. In a mixture, counts of mouse
 genes in human cells (and of human genes in mouse cells) can only come from ambient RNA, which gives a
 ground truth for the contamination fraction and for the counts the correction should remove.
@@ -19,8 +19,10 @@ import pandas as pd
 import scanpy
 import scipy.io
 import scipy.sparse as sp
+from scipy.stats import spearmanr
 
 RUNS, TASKS, OUT = map(pathlib.Path, sys.argv[1:4])
+GENESET = pathlib.Path(sys.argv[4]) if len(sys.argv) > 4 else RUNS.parent / "geneset"
 OUT.mkdir(parents=True, exist_ok=True)
 ASSETS = pathlib.Path(__file__).resolve().parent.parent / "assets"
 C_R, C_PY, C_TRUE = "#eb6834", "#2a78d6", "#52514e"
@@ -73,12 +75,34 @@ for t in sorted(LABEL, key=list(LABEL).index):
     expected = np.where(hum, soup_mouse, 1 - soup_mouse)
     row = dict(dataset=t, label=LABEL[t], droplets=tod.shape[1], cells=toc.shape[1], human=int(hum.sum()),
                mouse=int(mou.sum()), true_rho=o0[pure].sum() / (n[pure] * expected[pure]).sum())
+    # per species and per cell: contamination differs between cells
+    row["true_human"] = o0[hum].sum() / (n[hum].sum() * soup_mouse)
+    row["true_mouse"] = o0[mou].sum() / (n[mou].sum() * (1 - soup_mouse))
+    cell_true = o0[pure] / (n[pure] * expected[pure])
+    row["rho_cell_q1"], row["rho_cell_q3"] = np.percentile(cell_true, [25, 75])
+    row["spearman_rho_numi"] = spearmanr(cell_true, n[pure])[0]
+    # gene-set estimates (06_geneset): five most abundant soup genes, with and without MT genes and MALAT1
+    for mode in ("all", "nomt"):
+        gs = {e: json.load(open(GENESET / ENG[e] / f"{t}_{mode}.json")) for e in ENG}
+        row[f"gs_{mode}_R"], row[f"gs_{mode}_py"] = gs["R"]["rho"], gs["py"]["rho"]
+        if mode == "all":                                         # how over-represented these genes are in the soup
+            ids = pd.Index(genes.id)
+            ratios = []
+            for sp_, cells_, gl in [("mouse", hum, gs["R"]["genes"]["mouse"]), ("human", mou, gs["R"]["genes"]["human"])]:
+                own = (genes.genome == sp_).to_numpy()
+                amb = np.asarray(toc[:, cells_].sum(axis=1)).ravel() * own
+                soup_sp = res["R"][2] * own
+                gi = ids.get_indexer(gl)
+                ratios.append((soup_sp[gi].sum() / soup_sp.sum()) / (amb[gi].sum() / amb.sum()))
+            row["top5_soup_overrep"] = float(np.mean(ratios))
     for e in ENG:
         r, adj, soup = res[e]
         o1, s1 = split(adj)
         row[f"rho_{e}"] = r["rho"]
         row[f"removed_{e}"] = 1 - o1[pure].sum() / o0[pure].sum()
         row[f"kept_{e}"] = s1[pure].sum() / s0[pure].sum()
+        row[f"removed_human_{e}"] = 1 - o1[hum].sum() / o0[hum].sum()
+        row[f"removed_mouse_{e}"] = 1 - o1[mou].sum() / o0[mou].sum()
         row[f"sec_{e}"] = min(json.load(open(RUNS / ENG[e] / t / f"run{k}" / "result.json"))["seconds"]
                               for k in (1, 2))                    # faster of the two runs
         if t == EXAMPLE:
@@ -283,14 +307,27 @@ macros = {
     "speedMin": f"{speed.min():.1f}", "speedMax": f"{speed.max():.1f}", "speedMed": f"{speed.median():.1f}",
     "tBigR": f"{big.sec_R:.0f}", "tBigPy": f"{big.sec_py:.0f}", "bigName": big.label,
     "exampleName": LABEL[EXAMPLE], "exampleEntries": f"{int(ex.entries):,}", "nSample": "200,000",
+    "spearMin": f"{tab.spearman_rho_numi.min():.2f}", "spearMax": f"{tab.spearman_rho_numi.max():.2f}",
+    "exTrueHuman": f"{ex.true_human * 100:.1f}", "exTrueMouse": f"{ex.true_mouse * 100:.1f}",
+    "exRemHuman": f"{ex.removed_human_R * 100:.0f}", "exRemMouse": f"{ex.removed_mouse_R * 100:.0f}",
+    "nSameGeneset": int(((tab.gs_all_py / tab.gs_all_R - 1).abs().lt(1e-8)
+                         & (tab.gs_nomt_py / tab.gs_nomt_R - 1).abs().lt(1e-8)).sum()),
+    "gsRelDiffMax": f"{max((tab.gs_all_py / tab.gs_all_R - 1).abs().max(), (tab.gs_nomt_py / tab.gs_nomt_R - 1).abs().max()):.0e}",
+    "gsAllMin": f"{tab.gs_all_R.min() * 100:.1f}", "gsAllMax": f"{tab.gs_all_R.max() * 100:.1f}",
+    "gsNomtMin": f"{tab.gs_nomt_R.min() * 100:.1f}", "gsNomtMax": f"{tab.gs_nomt_R.max() * 100:.1f}",
+    "overrepMin": f"{tab.top5_soup_overrep.min():.1f}", "overrepMax": f"{tab.top5_soup_overrep.max():.1f}",
 }
 for key, name in [("OneK", "hgmm_1k_v3"), ("FiveK", "hgmm_5k_v3"), ("SixK", "hgmm_6k"), ("TenK", "hgmm_10k_v3"),
                   ("TwelveK", "hgmm_12k")]:
     r_ = tab.set_index("dataset").loc[name]
     macros[f"rho{key}"] = f"{r_.rho_R * 100:.1f}"
     macros[f"true{key}"] = f"{r_.true_rho * 100:.1f}"
+    macros[f"gsNomt{key}"] = f"{r_.gs_nomt_R * 100:.1f}"
 with open(OUT / "numbers.tex", "w") as fh:
     for k, v in macros.items():
         fh.write(f"\\newcommand{{\\{k}}}{{{v}}}\n")
 print(open(OUT / "numbers.tex").read())
+cols = ["label", "true_rho", "true_human", "true_mouse", "rho_R", "gs_all_R", "gs_nomt_R", "removed_human_R",
+        "removed_mouse_R", "spearman_rho_numi", "top5_soup_overrep"]
+tab[cols].to_csv(OUT / "table_s1.tsv", sep="\t", index=False)
 print(tab.drop(columns=["label"]).round(5).to_string())

@@ -7,7 +7,8 @@ cells, can only come from ambient RNA, which gives a ground truth for the correc
 ```
 python  scripts/01_prepare.py <dir with extracted 10x archives> <tasks_dir>   # one clustering for both
 python  scripts/run_all.py <tasks_dir> <runs_dir> <Rscript> <python> 10 1,2   # idle cores, 1 thread each
-python  scripts/05_figures.py <runs_dir> <tasks_dir> figures
+Rscript scripts/06_geneset.R <task_dir> <out.json> [nomt|all]  ;  python scripts/06_geneset.py <task_dir> <out.json> [nomt|all]
+python  scripts/05_figures.py <runs_dir> <tasks_dir> figures <geneset_dir>
 ```
 
 Both run `SoupChannel(tod, toc)`, `setClusters`, `autoEstCont` and `adjustCounts` with defaults.
